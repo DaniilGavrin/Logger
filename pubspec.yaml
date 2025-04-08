@@ -10,6 +10,7 @@ dependencies:
   bitsdojo_window: ^0.1.6
   flutter:
     sdk: flutter
+  flutter_secure_storage: ^9.2.4
   web_socket_channel: ^3.0.2
 
 dev_dependencies:

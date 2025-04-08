@@ -5,12 +5,16 @@ import 'package:logger/model/program.dart';
 import 'package:logger/screen/program_logs_screen.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'dart:convert';
+import 'package:logger/service/ws_connection.dart';
 
 class LogScreen extends StatefulWidget {
-  final WebSocketChannel ws;
+  final WSConnection ws;
   final Stream stream;
 
-  LogScreen({required this.ws, required this.stream});
+  LogScreen({
+    required this.ws,
+    required this.stream,
+  });
 
   @override
   _LogScreenState createState() => _LogScreenState();
@@ -30,13 +34,13 @@ class _LogScreenState extends State<LogScreen> {
   }
 
   void _setupWebSocketListener() {
-    _subscription = widget.stream.asBroadcastStream().listen((event) {
+    _subscription = widget.stream.listen((event) { // ✅ Используем переданный поток
       try {
-        print('Raw received data: $event'); // Отладочный вывод сырых данных
+        print('Raw received data: $event');
         final data = jsonDecode(event);
         if (!mounted) return;
 
-        print('Decoded data: $data'); // Отладочный вывод декодированных данных
+        print('Decoded data: $data');
 
         if (data is! Map<String, dynamic>) {
           throw FormatException('Неверный формат данных');
@@ -50,7 +54,7 @@ class _LogScreenState extends State<LogScreen> {
             _handleError(data['message']?.toString());
             break;
           default:
-            print('Unknown message type: ${data['type']}'); // Логирование неизвестных типов
+            print('Unknown message type: ${data['type']}');
         }
       } catch (e) {
         _handleError('Ошибка обработки данных: $e');
@@ -92,12 +96,12 @@ class _LogScreenState extends State<LogScreen> {
     if (!mounted) return;
     setState(() => _isLoading = true);
 
-    widget.ws.sink.add(jsonEncode({
+    // ✅ Используем переданный экземпляр соединения
+    widget.ws.send(jsonEncode({
       'type': 'get_programs',
       'request_id': DateTime.now().millisecondsSinceEpoch.toString(),
     }));
 
-    // Таймаут 10 секунд
     Future.delayed(Duration(seconds: 10)).then((_) {
       if (_isLoading && mounted) {
         setState(() {
@@ -115,6 +119,7 @@ class _LogScreenState extends State<LogScreen> {
         builder: (context) => ProgramLogsScreen(
           program: program,
           ws: widget.ws,
+          stream: widget.stream,
         ),
       ),
     );
@@ -230,8 +235,8 @@ class _LogScreenState extends State<LogScreen> {
 
   @override
   void dispose() {
+    // Только отменяем подписку, не трогаем соединение
     _subscription?.cancel();
-    widget.ws.sink.close();
     super.dispose();
   }
 }

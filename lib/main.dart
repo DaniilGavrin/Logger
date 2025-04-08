@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:bitsdojo_window/bitsdojo_window.dart';
 import 'package:logger/screen/log_screen.dart';
+import 'package:logger/service/ws_connection.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'dart:convert';
 
@@ -84,55 +85,72 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
       _errorText = null;
     });
 
-    final ws = WebSocketChannel.connect(Uri.parse('ws://localhost:8080/ws'));
-    ws.sink.add(jsonEncode({
-      'type': 'auth',
-      'username': _usernameController.text,
-      'password': _passwordController.text,
-    }));
+    // Получаем экземпляр синглтона
+    final wsConnection = WSConnection();
 
-    final controller = StreamController<String>.broadcast();
+    try {
+      await wsConnection.connect(Uri.parse('ws://localhost:8080/ws'));
 
-    ws.stream.listen(
-          (event) => controller.add(event),
-      onError: (error) => controller.addError(error),
-      onDone: () => controller.close(),
-    );
+      // Создаем подписку на сообщения
+      final subscription = wsConnection.stream.listen(
+            (event) {
+          final data = jsonDecode(event);
+          if (!mounted) return;
 
-    controller.stream.listen((event) {
-      final data = jsonDecode(event);
-      if (!mounted) return;
+          if (data['status'] == 'ok') {
+            Navigator.pushAndRemoveUntil(
+              context,
+              PageRouteBuilder(
+                transitionDuration: const Duration(milliseconds: 800),
+                pageBuilder: (_, __, ___) => LogScreen(
+                  ws: wsConnection,
+                  stream: wsConnection.stream,
+                ),
+                transitionsBuilder: (_, animation, __, child) {
+                  return FadeTransition(
+                    opacity: animation,
+                    child: child,
+                  );
+                },
+              ),
+                  (route) => false,
+            );
+          } else {
+            setState(() {
+              _errorText = data['message'];
+              _isLoading = false;
+            });
+            // Закрываем соединение при ошибке аутентификации
+            wsConnection.disconnect();
+          }
+        },
+        onError: (error) {
+          if (!mounted) return;
+          setState(() {
+            _errorText = 'Connection Error';
+            _isLoading = false;
+          });
+          wsConnection.disconnect();
+        },
+      );
 
-      if (data['status'] == 'ok') {
-        Navigator.pushAndRemoveUntil(
-          context,
-          PageRouteBuilder(
-            transitionDuration: const Duration(milliseconds: 800),
-            pageBuilder: (_, __, ___) => LogScreen(ws: ws, stream: controller.stream),
-            transitionsBuilder: (_, animation, __, child) {
-              return FadeTransition(
-                opacity: animation,
-                child: child,
-              );
-            },
-          ),
-              (route) => false,
-        );
-      } else {
-        setState(() {
-          _errorText = data['message'];
-          _isLoading = false;
-        });
-        ws.sink.close();
-      }
-    }, onError: (error) {
-      if (!mounted) return;
+      // Отправляем запрос аутентификации
+      wsConnection.send(jsonEncode({
+        'type': 'auth',
+        'username': _usernameController.text,
+        'password': _passwordController.text,
+      }));
+
+      // Отменяем подписку при уничтожении виджета
+      subscription.onDone(() => subscription.cancel());
+
+    } catch (e) {
       setState(() {
         _errorText = 'Connection Error';
         _isLoading = false;
       });
-      ws.sink.close();
-    });
+      wsConnection.disconnect();
+    }
   }
 
   @override
