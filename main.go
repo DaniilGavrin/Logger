@@ -14,13 +14,14 @@ import (
 
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
-		return true // Для разработки разрешаем все домены
+		return true // Разрешаем все origin для разработки
 	},
+	HandshakeTimeout: 10 * time.Second, // Таймаут на установку соединения
 }
 
 var db *sql.DB
 
-// Структуры сообщений
+// Структуры данных
 type AuthRequest struct {
 	Type     string `json:"type"`
 	Username string `json:"username"`
@@ -48,67 +49,151 @@ type User struct {
 	Username string
 }
 
+func main() {
+	var err error
+	// Инициализация подключения к БД
+	db, err = sql.Open("mysql", "root:0000@tcp(localhost:3306)/Logger?parseTime=true")
+	if err != nil {
+		log.Fatal("Ошибка подключения к БД:", err)
+	}
+	defer db.Close()
+
+	// Проверка соединения с БД
+	if err := db.Ping(); err != nil {
+		log.Fatal("Проверка соединения с БД не удалась:", err)
+	}
+
+	// Настройка HTTP маршрутов
+	http.HandleFunc("/ws", handleConnection)
+
+	log.Println("🚀 Сервер запущен на ws://localhost:8080/ws")
+	log.Fatal(http.ListenAndServe(":8080", nil))
+}
+
 func handleConnection(w http.ResponseWriter, r *http.Request) {
+	log.Println("🔌 Новое соединение")
+
+	// Апгрейд соединения до WebSocket
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Println("Ошибка при апгрейде:", err)
+		log.Println("❌ Ошибка при апгрейде:", err)
 		return
 	}
 	defer conn.Close()
 
-	var currentUser *User = nil
+	conn.SetReadLimit(1048576) // 1MB
+	conn.SetWriteDeadline(time.Now().Add(30 * time.Second))
 
+	// Измените обработчик Pong
+	conn.SetPongHandler(func(string) error {
+		conn.SetWriteDeadline(time.Now().Add(30 * time.Second))
+		return nil
+	})
+
+	conn.SetCloseHandler(func(code int, text string) error {
+		log.Printf("🔌 Соединение закрыто клиентом: %d %s", code, text)
+		return nil
+	})
+
+	// Запуск ping-отправителя
+	stopPing := make(chan struct{})
+	defer close(stopPing)
+	go pingSender(conn, stopPing)
+
+	var currentUser *User
+
+	// Основной цикл обработки сообщений
 	for {
+		conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
-			log.Println("Ошибка чтения:", err)
+			handleReadError(err)
 			break
 		}
 
-		var msgBase struct {
-			Type string `json:"type"`
-		}
-		if err := json.Unmarshal(msg, &msgBase); err != nil {
-			sendError(conn, "Неверный формат сообщения")
-			continue
-		}
+		processMessage(conn, msg, &currentUser)
+	}
+}
 
-		switch msgBase.Type {
-		case "auth":
-			handleAuth(conn, msg, &currentUser)
+func pingSender(conn *websocket.Conn, stop <-chan struct{}) {
+	ticker := time.NewTicker(25 * time.Second)
+	defer ticker.Stop()
 
-		case "log":
-			handleLog(conn, msg, currentUser)
-
-		case "get_programs":
-			handleGetPrograms(conn, currentUser)
-
-		default:
-			sendError(conn, "Неизвестный тип сообщения")
+	for {
+		select {
+		case <-ticker.C:
+			sendPing(conn)
+		case <-stop:
+			return
 		}
 	}
 }
 
-func handleAuth(conn *websocket.Conn, msg []byte, currentUser **User) {
+func sendPing(conn *websocket.Conn) {
+	if err := conn.WriteControl(
+		websocket.PingMessage,
+		[]byte{},
+		time.Now().Add(5*time.Second),
+	); err != nil {
+		log.Println("⚠️ Ошибка отправки Ping:", err)
+		return
+	}
+	log.Println("🏓 Отправлен Ping")
+}
+
+func handleReadError(err error) {
+	if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
+		log.Printf("⚠️ Ошибка чтения: %v", err)
+	}
+}
+
+func processMessage(conn *websocket.Conn, msg []byte, user **User) {
+	log.Printf("📨 Получено сообщение: %s\n", string(msg))
+
+	var base struct{ Type string }
+	if err := json.Unmarshal(msg, &base); err != nil {
+		sendError(conn, "Неверный формат сообщения")
+		return
+	}
+
+	switch base.Type {
+	case "ping": // Добавлен обработчик ping
+		handlePing(conn)
+	case "auth":
+		handleAuth(conn, msg, user)
+	case "log":
+		handleLog(conn, msg, *user)
+	case "get_programs":
+		handleGetPrograms(conn, *user)
+	case "get_logs":
+		handleGetLogs(conn, msg)
+	default:
+		sendError(conn, "Неизвестный тип сообщения")
+	}
+}
+
+func handlePing(conn *websocket.Conn) {
+	log.Println("🏓 Получен Ping от клиента")
+	sendJSON(conn, map[string]string{
+		"type": "pong",
+	})
+}
+
+func handleAuth(conn *websocket.Conn, msg []byte, user **User) {
 	var auth AuthRequest
 	if err := json.Unmarshal(msg, &auth); err != nil {
 		sendError(conn, "Ошибка формата авторизации")
 		return
 	}
 
-	user, err := authenticateUser(auth.Username, auth.Password)
+	u, err := authenticateUser(auth.Username, auth.Password)
 	if err != nil {
 		sendError(conn, "Неверные учетные данные")
 		return
 	}
 
-	*currentUser = user
-	conn.WriteJSON(map[string]interface{}{
-		"type":    "auth",
-		"status":  "ok",
-		"message": "Авторизация успешна",
-	})
-	log.Printf("Авторизован: %s", user.Username)
+	*user = u
+	sendSuccess(conn, "auth", "Авторизация успешна")
 }
 
 func handleLog(conn *websocket.Conn, msg []byte, user *User) {
@@ -124,16 +209,11 @@ func handleLog(conn *websocket.Conn, msg []byte, user *User) {
 	}
 
 	if err := insertLog(user.ID, logMsg); err != nil {
-		log.Printf("Ошибка записи лога: %v", err)
 		sendError(conn, "Ошибка сохранения лога")
 		return
 	}
 
-	conn.WriteJSON(map[string]interface{}{
-		"type":    "log",
-		"status":  "ok",
-		"message": "Лог сохранен",
-	})
+	sendSuccess(conn, "log", "Лог сохранен")
 }
 
 func handleGetPrograms(conn *websocket.Conn, user *User) {
@@ -142,26 +222,48 @@ func handleGetPrograms(conn *websocket.Conn, user *User) {
 		return
 	}
 
-	log.Printf("Запрос программ для пользователя ID: %d", user.ID) // Логирование
-
 	programs, err := getPrograms(user.ID)
 	if err != nil {
-		log.Printf("Ошибка получения программ: %v", err)
 		sendError(conn, "Ошибка получения данных")
 		return
 	}
 
-	log.Printf("Найдено программ: %d", len(programs)) // Логирование
-	conn.WriteJSON(map[string]interface{}{
+	sendJSON(conn, map[string]interface{}{
 		"type": "programs",
 		"data": programs,
 	})
 }
 
+func handleGetLogs(conn *websocket.Conn, msg []byte) {
+	var req struct {
+		ProgramID int `json:"program_id"`
+	}
+
+	if err := json.Unmarshal(msg, &req); err != nil {
+		sendError(conn, "Неверный формат запроса")
+		return
+	}
+
+	logs, err := fetchLogs(req.ProgramID)
+	if err != nil {
+		sendError(conn, "Ошибка получения логов")
+		return
+	}
+
+	sendJSON(conn, map[string]interface{}{
+		"type": "logs",
+		"data": logs,
+	})
+}
+
+// Database functions
 func authenticateUser(username, password string) (*User, error) {
 	var user User
-	query := `SELECT id, username FROM users WHERE username = ? AND password = ?`
-	err := db.QueryRow(query, username, password).Scan(&user.ID, &user.Username)
+	err := db.QueryRow(
+		"SELECT id, username FROM users WHERE username = ? AND password = ?",
+		username, password,
+	).Scan(&user.ID, &user.Username)
+
 	if err != nil {
 		return nil, fmt.Errorf("ошибка аутентификации: %w", err)
 	}
@@ -169,9 +271,10 @@ func authenticateUser(username, password string) (*User, error) {
 }
 
 func insertLog(userID int, logMsg LogMessage) error {
-	query := `INSERT INTO logs (program_id, user_id, timestamp, level, message, metadata)
-              VALUES (?, ?, ?, ?, ?, ?)`
-	_, err := db.Exec(query,
+	_, err := db.Exec(
+		`INSERT INTO logs 
+		(program_id, user_id, timestamp, level, message, metadata) 
+		VALUES (?, ?, ?, ?, ?, ?)`,
 		logMsg.ProgramID,
 		userID,
 		logMsg.Timestamp.Format(time.RFC3339),
@@ -184,12 +287,13 @@ func insertLog(userID int, logMsg LogMessage) error {
 
 func getPrograms(userID int) ([]Program, error) {
 	rows, err := db.Query(`
-        SELECT id, name, description, user_id 
-        FROM programs 
-        WHERE user_id = ?
-    `, userID)
+		SELECT id, name, description, user_id 
+		FROM programs 
+		WHERE user_id = ?`,
+		userID,
+	)
 	if err != nil {
-		return nil, fmt.Errorf("ошибка запроса: %w", err)
+		return nil, err
 	}
 	defer rows.Close()
 
@@ -197,34 +301,65 @@ func getPrograms(userID int) ([]Program, error) {
 	for rows.Next() {
 		var p Program
 		if err := rows.Scan(&p.ID, &p.Name, &p.Description, &p.UserID); err != nil {
-			return nil, fmt.Errorf("ошибка сканирования: %w", err)
+			return nil, err
 		}
 		programs = append(programs, p)
 	}
 	return programs, nil
 }
 
+func fetchLogs(programID int) ([]LogMessage, error) {
+	rows, err := db.Query(`
+		SELECT timestamp, level, message, metadata 
+		FROM logs 
+		WHERE program_id = ? 
+		ORDER BY timestamp DESC 
+		LIMIT 100`,
+		programID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var logs []LogMessage
+	for rows.Next() {
+		var l LogMessage
+		var ts string
+		var metadata sql.NullString
+
+		if err := rows.Scan(&ts, &l.Level, &l.Message, &metadata); err != nil {
+			return nil, err
+		}
+
+		l.Timestamp, _ = time.Parse(time.RFC3339, ts)
+		if metadata.Valid {
+			l.Metadata = json.RawMessage(metadata.String)
+		}
+		logs = append(logs, l)
+	}
+	return logs, nil
+}
+
+// Helpers
 func sendError(conn *websocket.Conn, message string) {
-	conn.WriteJSON(map[string]string{
+	log.Printf("⚠️ Ошибка: %s", message)
+	sendJSON(conn, map[string]string{
 		"type":    "error",
 		"message": message,
 	})
 }
 
-func main() {
-	var err error
-	db, err = sql.Open("mysql", "root:0000@tcp(localhost:3306)/Logger?parseTime=true")
-	if err != nil {
-		log.Fatal("Ошибка подключения к БД:", err)
+func sendSuccess(conn *websocket.Conn, msgType, message string) {
+	sendJSON(conn, map[string]string{
+		"type":    msgType,
+		"status":  "ok",
+		"message": message,
+	})
+}
+
+func sendJSON(conn *websocket.Conn, data interface{}) {
+	if err := conn.WriteJSON(data); err != nil {
+		log.Println("❌ Ошибка отправки ответа:", err)
 	}
-	defer db.Close()
-
-	if err := db.Ping(); err != nil {
-		log.Fatal("Проверка соединения с БД не удалась:", err)
-	}
-
-	http.HandleFunc("/ws", handleConnection)
-
-	log.Println("Сервер запущен на ws://localhost:8080/ws")
-	log.Fatal(http.ListenAndServe(":8080", nil))
 }
