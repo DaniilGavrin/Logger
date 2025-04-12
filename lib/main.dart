@@ -200,6 +200,7 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
                     _buildInputFields(),
                     const SizedBox(height: 30),
                     _buildLoginButton(),
+                    const SizedBox(height: 40),
                     if (_errorText != null) _buildErrorText(),
                   ],
                 ),

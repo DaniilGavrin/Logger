@@ -91,7 +91,6 @@ class WSConnection {
     final message = data.toString();
     _messageController.add(message);
 
-    // Убрали отправку ping при получении pong
     final decoded = jsonDecode(message);
     if (decoded is Map && decoded['type'] == 'pong') {
       if (kDebugMode) {

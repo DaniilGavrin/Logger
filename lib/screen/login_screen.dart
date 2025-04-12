@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:logger/model/program.dart';
+import 'package:logger/service/app_config.dart';
 import 'package:logger/service/ws_connection.dart';
 import 'package:logger/screen/log_screen.dart';
 
@@ -25,12 +26,12 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
   final TextEditingController _serverController = TextEditingController();
   final _formKey = GlobalKey<FormState>();
   bool _isLoading = false;
-  bool _showServerField = false;
   String? _errorText;
   StreamSubscription<dynamic>? _authSubscription;
   final FocusNode _serverFocus = FocusNode();
   bool _rememberMe = true;
   final FlutterSecureStorage _secureStorage = const FlutterSecureStorage();
+  final AppConfig _appConfig = AppConfig();
 
   @override
   void initState() {
@@ -58,7 +59,8 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
   }
 
   Future<void> _loadSavedData() async {
-    _serverController.text = widget.initialServer ?? await _secureStorage.read(key: 'server_url') ?? '';
+    await _appConfig.initialize();
+    _serverController.text = widget.initialServer ?? _appConfig.serverUrl ?? '';
     _usernameController.text = await _secureStorage.read(key: 'username') ?? '';
     _passwordController.text = await _secureStorage.read(key: 'password') ?? '';
 
@@ -85,14 +87,12 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
     } catch (e) {
       setState(() {
         _isLoading = false;
-        _showServerField = true;
+        //_showServerField = true;
         _errorText = 'Auto-connect failed: ${e.toString()}';
       });
       FocusScope.of(context).requestFocus(_serverFocus);
     }
   }
-
-
 
   void _sendAuthRequest() {
     if (_usernameController.text.isEmpty || _passwordController.text.isEmpty) {
@@ -200,15 +200,14 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
   }
 
   Future<void> _saveCredentials() async {
-    if (!_rememberMe) {
-      await _secureStorage.delete(key: 'username');
-      await _secureStorage.delete(key: 'password');
-      return;
-    }
+    // Сохраняем сервер всегда
+    await _appConfig.setServerUrl(_serverController.text);
 
-    await _secureStorage.write(key: 'server_url', value: _serverController.text);
-    await _secureStorage.write(key: 'username', value: _usernameController.text);
-    await _secureStorage.write(key: 'password', value: _passwordController.text);
+    if (_rememberMe) {
+      // Сохраняем логин/пароль только если нужно
+      await _secureStorage.write(key: 'username', value: _usernameController.text);
+      await _secureStorage.write(key: 'password', value: _passwordController.text);
+    }
   }
 
   void _navigateToLogScreen(Program program) {
@@ -239,9 +238,7 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
       _errorText = error.toString()
           .replaceAll('Exception: ', '')
           .replaceAll('Authentication failed', 'Неверный логин или пароль');
-
       _isLoading = false;
-      _showServerField = true;
     });
 
     FocusScope.of(context).requestFocus(_serverFocus);
@@ -325,32 +322,29 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
   }
 
   Widget _buildServerField() {
-    return AnimatedSize(
-      duration: const Duration(milliseconds: 300),
-      child: _showServerField || _serverController.text.isEmpty
-          ? Column(
-        children: [
-          TextFormField(
-            controller: _serverController,
-            focusNode: _serverFocus,
-            decoration: InputDecoration(
-              labelText: 'Server Address',
-              hintText: 'ws://your-server.com:8080',
-              prefixIcon: const Icon(Icons.public, color: Colors.cyan),
-              filled: true,
-              fillColor: Colors.white.withOpacity(0.1),
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(15),
-                borderSide: BorderSide.none,
-              ),
-            ),
-            keyboardType: TextInputType.url,
-            validator: _validateServer,
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 20),
+      child: TextFormField(
+        controller: _serverController,
+        focusNode: _serverFocus,
+        decoration: InputDecoration(
+          labelText: 'Server Address',
+          hintText: 'ws://your-server.com:8080',
+          prefixIcon: const Icon(Icons.public, color: Colors.cyan),
+          filled: true,
+          fillColor: Colors.white.withOpacity(0.1),
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(15),
+            borderSide: BorderSide.none,
           ),
-          const SizedBox(height: 20),
-        ],
-      )
-          : const SizedBox(),
+          errorStyle: TextStyle(
+            color: Colors.redAccent.withOpacity(0.8),
+            fontSize: 14,
+          ),
+        ),
+        keyboardType: TextInputType.url,
+        validator: _validateServer,
+      ),
     );
   }
 
