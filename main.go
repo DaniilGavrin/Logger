@@ -309,12 +309,13 @@ func getPrograms(userID int) ([]Program, error) {
 }
 
 func fetchLogs(programID int) ([]LogMessage, error) {
+	// 1. Добавляем program_id в SELECT
 	rows, err := db.Query(`
-		SELECT timestamp, level, message, metadata 
-		FROM logs 
-		WHERE program_id = ? 
-		ORDER BY timestamp DESC 
-		LIMIT 100`,
+        SELECT program_id, timestamp, level, message, metadata 
+        FROM logs 
+        WHERE program_id = ? 
+        ORDER BY timestamp DESC 
+        LIMIT 100`,
 		programID,
 	)
 	if err != nil {
@@ -328,7 +329,14 @@ func fetchLogs(programID int) ([]LogMessage, error) {
 		var ts string
 		var metadata sql.NullString
 
-		if err := rows.Scan(&ts, &l.Level, &l.Message, &metadata); err != nil {
+		// 2. Сканируем program_id из результата запроса
+		if err := rows.Scan(
+			&l.ProgramID, // Добавлено поле program_id
+			&ts,
+			&l.Level,
+			&l.Message,
+			&metadata,
+		); err != nil {
 			return nil, err
 		}
 
